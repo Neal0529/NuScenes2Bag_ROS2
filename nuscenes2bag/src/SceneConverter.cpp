@@ -15,7 +15,7 @@
 #include <string>
 #include "sensor_msgs/msg/image.h"
 #include "sensor_msgs/msg/point_cloud2.h"
-
+#include "sensor_msgs/msg/camera_info.h"
 
 using namespace std;
 
@@ -110,20 +110,62 @@ SceneConverter::convertSampleDatas(std::unique_ptr<rosbag2_cpp::Writer>& outBag,
       metaDataProvider.getSensorName(calibratedSensorInfo.sensorToken);
     const std::string sensorName = toLower(calibratedSensorName.name);
 
-    if (sampleType == SampleType::CAMERA) {
-      const std::string topicName = sensorName + "/raw";
+if (sampleType == SampleType::CAMERA) {
+      // 1. 处理图像 (原逻辑)
+      const std::string imageTopicName = sensorName + "/raw";
       sensor_msgs::msg::Image msg = readImageFile(sampleFilePath).value();
       rclcpp::Time stamp = stampUs2RosTime(sampleData.timeStamp);
-      std::string dataType = "sensor_msgs::msg::Image";
-      outBag->create_topic(
-        {
-          topicName,
-          "sensor_msgs/msg/Image",
-          rmw_get_serialization_format(),
-          ""
-        }
-      );
-      outBag->write(msg, topicName, stamp);
+      
+      // 关键：确保 Frame ID 被正确设置
+      msg.header.stamp = stamp;
+      msg.header.frame_id = sensorName; 
+
+      outBag->create_topic({imageTopicName, "sensor_msgs/msg/Image", rmw_get_serialization_format(), ""});
+      outBag->write(msg, imageTopicName, stamp);
+
+      // --- [修改开始] 处理 CameraInfo ---
+      const std::string infoTopicName = sensorName + "/camera_info";
+      
+      sensor_msgs::msg::CameraInfo infoMsg;
+      infoMsg.header = msg.header; // 时间戳和 FrameID 必须与 Image 一致
+      infoMsg.height = msg.height;
+      infoMsg.width = msg.width;
+      
+      // nuScenes 图像已去畸变，使用针孔模型
+      infoMsg.distortion_model = "plumb_bob";
+      infoMsg.d.resize(5, 0.0); 
+
+      // 检查内存中是否有内参数据
+      if (calibratedSensorInfo.cameraIntrinsics) {
+          // 获取 std::array 数据
+          const auto& K = calibratedSensorInfo.cameraIntrinsics.value();
+
+          // 填充 K 矩阵 (3x3)
+          infoMsg.k[0] = K[0][0]; infoMsg.k[1] = K[0][1]; infoMsg.k[2] = K[0][2];
+          infoMsg.k[3] = K[1][0]; infoMsg.k[4] = K[1][1]; infoMsg.k[5] = K[1][2];
+          infoMsg.k[6] = K[2][0]; infoMsg.k[7] = K[2][1]; infoMsg.k[8] = K[2][2];
+
+          // 填充 P 矩阵 (3x4) -> [K | 0]
+          // Row 1
+          infoMsg.p[0] = K[0][0]; infoMsg.p[1] = K[0][1]; infoMsg.p[2] = K[0][2]; infoMsg.p[3] = 0.0;
+          // Row 2
+          infoMsg.p[4] = K[1][0]; infoMsg.p[5] = K[1][1]; infoMsg.p[6] = K[1][2]; infoMsg.p[7] = 0.0;
+          // Row 3
+          infoMsg.p[8] = 0.0;     infoMsg.p[9] = 0.0;     infoMsg.p[10] = 1.0;    infoMsg.p[11] = 0.0;
+      } else {
+          // 如果缺失，给一个单位矩阵防止报错
+          std::cerr << "Warning: Intrinsics missing for " << sensorName << std::endl;
+          infoMsg.k[0] = 1.0; infoMsg.k[4] = 1.0; infoMsg.k[8] = 1.0;
+          infoMsg.p[0] = 1.0; infoMsg.p[5] = 1.0; infoMsg.p[10] = 1.0;
+      }
+
+      // R 矩阵设为单位阵
+      infoMsg.r[0] = 1.0; infoMsg.r[4] = 1.0; infoMsg.r[8] = 1.0;
+
+      // 写入 Bag
+      outBag->create_topic({infoTopicName, "sensor_msgs/msg/CameraInfo", rmw_get_serialization_format(), ""});
+      outBag->write(infoMsg, infoTopicName, stamp);
+      // --- [修改结束] ---
     } else if (sampleType == SampleType::LIDAR) {
       std::string topicName = sensorName;
 
