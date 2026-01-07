@@ -227,16 +227,35 @@ MetaDataReader::loadCalibratedSensorInfo(const fs::path& filePath)
     Token token = calibratedSensorJson["token"];
     auto translation = calibratedSensorJson["translation"];
     auto rotation = calibratedSensorJson["rotation"];
+    
+    // --- [修改开始] 手动解析内参矩阵 ---
+    boost::optional<IntrinsicsMatrix> intrinsics_opt;
+
+    // 检查 JSON 中是否有 camera_intrinsic 字段
+    if (calibratedSensorJson.contains("camera_intrinsic")) {
+        auto& raw_intrinsic = calibratedSensorJson["camera_intrinsic"];
+        
+        // 确保它是一个至少 3x3 的数组
+        if (raw_intrinsic.is_array() && raw_intrinsic.size() >= 3) {
+            IntrinsicsMatrix mat; // 这是 std::array<std::array<double, 3>, 3>
+            // 双重循环手动填充，解决类型转换问题
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) {
+                    mat[r][c] = raw_intrinsic[r][c].get<double>();
+                }
+            }
+            intrinsics_opt = mat;
+        }
+    }
+    // --- [修改结束] ---
+
     CalibratedSensorInfo calibratedSensorInfo{
       token,
       calibratedSensorJson["sensor_token"],
       { translation[0], translation[1], translation[2] },
       { rotation[0], rotation[1], rotation[2], rotation[3] },
-      boost::none
+      intrinsics_opt // 将解析好的数据传入结构体
     };
-
-    boost::optional<json::json> sensor_intrinsics =
-      calibratedSensorJson["rotation"];
 
     calibratedSensorToken2CalibratedSensorInfo.emplace(token,
                                                        calibratedSensorInfo);
